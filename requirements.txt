@@ -1,0 +1,7 @@
+requests
+beautifulsoup4
+cloudscraper
+undetected-chromedriver
+selenium
+gspread
+python-dotenv

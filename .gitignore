@@ -1,0 +1,23 @@
+# Google Credentials
+*.json
+
+# Environment Variables
+.env
+.env.local
+
+
+# Python folders
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Browser drivers & logs
+chromedriver.exe
+geckodriver
+ghostdriver.log
+/uc_driver/
+
+# Temporary files
+*.html
+!index.html # Keep index.html if it exists, otherwise ignore all html
