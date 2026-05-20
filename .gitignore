@@ -21,3 +21,6 @@ ghostdriver.log
 # Temporary files
 *.html
 !index.html # Keep index.html if it exists, otherwise ignore all html
+
+# Antigravity CLI
+.antigravitycli/
