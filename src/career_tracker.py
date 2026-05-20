@@ -130,21 +130,93 @@ def extract_job_details(platform_name, soup, url):
     # Ưu tiên 1: Dữ liệu nhúng JSON (Next.js / custom blocks)
     try:
         script_content = None
+        data = None
         script = soup.find('script', id='__NEXT_DATA__')
-        if script and script.string:
-            script_content = script.string
-        else:
-            for s in soup.find_all('script'):
-                content = s.string
-                if content and ('"jobDetail"' in content or '"jobTitle"' in content):
-                    script_content = content
-                    break
-        
-        if script_content:
-            if script_content.strip().startswith('window.'):
-                script_content = re.sub(r'^.*?=\s*', '', script_content.strip()).rstrip(';')
+        if script and (script.string or script.text):
+            script_content = script.string or script.text
             data = json.loads(script_content)
+        else:
+            # Check for Next.js App Router (RSC) streams
+            is_rsc = False
+            rsc_stream = ""
+            for s in soup.find_all('script'):
+                content = s.string or s.text
+                if content and 'self.__next_f.push' in content:
+                    is_rsc = True
+                    matches = re.findall(r'push\(\s*(\[.*\])\s*\)', content, re.DOTALL)
+                    for m in matches:
+                        try:
+                            arr = json.loads(m)
+                            if len(arr) > 1 and arr[0] == 1 and isinstance(arr[1], str):
+                                rsc_stream += arr[1]
+                        except:
+                            pass
             
+            if is_rsc and rsc_stream:
+                rsc_map = {}
+                pattern = r'([a-f0-9]{1,4}):(T\d+,|\{|\[|I|HL|"[^"]*"|\btrue\b|\bfalse\b)'
+                matches = list(re.finditer(pattern, rsc_stream))
+                for i, m in enumerate(matches):
+                    key = m.group(1)
+                    prefix = m.group(2)
+                    start = m.start()
+                    next_start = matches[i+1].start() if i + 1 < len(matches) else len(rsc_stream)
+                    full_content = rsc_stream[start:next_start]
+                    content = full_content[len(key) + 1:].strip()
+                    
+                    if content.startswith('T'):
+                        comma_idx = content.find(',')
+                        if comma_idx != -1:
+                            rsc_map[key] = content[comma_idx+1:]
+                            continue
+                    if content.startswith('{') or content.startswith('['):
+                        try:
+                            rsc_map[key] = json.loads(content)
+                            continue
+                        except:
+                            pass
+                    if (content.startswith('"') and content.endswith('"')) or (content.startswith("'") and content.endswith("'")):
+                        try:
+                            rsc_map[key] = json.loads(content)
+                            continue
+                        except:
+                            rsc_map[key] = content[1:-1]
+                            continue
+                    rsc_map[key] = content
+
+                job_detail_raw = None
+                for k, v in rsc_map.items():
+                    if isinstance(v, dict) and 'jobId' in v and 'jobTitle' in v:
+                        job_detail_raw = v
+                        break
+                
+                if job_detail_raw:
+                    def resolve_ref(val, resolved_set=None):
+                        if resolved_set is None: resolved_set = set()
+                        if isinstance(val, str) and val.startswith('$'):
+                            ref_key = val[1:]
+                            if ref_key in resolved_set: return val
+                            resolved_set.add(ref_key)
+                            if ref_key in rsc_map:
+                                return resolve_ref(rsc_map[ref_key], resolved_set)
+                        elif isinstance(val, list):
+                            return [resolve_ref(item, resolved_set.copy()) for item in val]
+                        elif isinstance(val, dict):
+                            return {k_n: resolve_ref(v_n, resolved_set.copy()) for k_n, v_n in val.items()}
+                        return val
+                    data = resolve_ref(job_detail_raw)
+            else:
+                for s in soup.find_all('script'):
+                    content = s.string
+                    if content and ('"jobDetail"' in content or '"jobTitle"' in content):
+                        script_content = content
+                        break
+                if script_content:
+                    if script_content.strip().startswith('window.'):
+                        script_content = re.sub(r'^.*?=\s*', '', script_content.strip()).rstrip(';')
+                    data = json.loads(script_content)
+        
+        if data:
             def find_key(obj, key):
                 if isinstance(obj, dict):
                     if key in obj: return obj[key]
@@ -157,7 +229,11 @@ def extract_job_details(platform_name, soup, url):
                         if res: return res
                 return None
 
-            job_detail = find_key(data, 'jobDetail') or find_key(data, 'jobs') or find_key(data, 'job')
+            if isinstance(data, dict) and ('jobId' in data or 'jobTitle' in data) and not ('props' in data or 'pageProps' in data):
+                job_detail = data
+            else:
+                job_detail = find_key(data, 'jobDetail') or find_key(data, 'jobs') or find_key(data, 'job')
+                
             if isinstance(job_detail, list) and len(job_detail) > 0:
                 job_detail = job_detail[0]
             
@@ -311,11 +387,54 @@ def extract_job_details(platform_name, soup, url):
     elif platform_name == "Jobsgo":
         title_el = soup.select_one('.job-detail-header h1, h1.job-title')
         result["title"] = title_el.text.strip() if title_el else result["title"]
-        comp_el = soup.select_one('.company-name, .employer-name')
-        result["company"] = comp_el.text.strip() if comp_el else result["company"]
         
-        desc_el = soup.select_one('.job-description, .content-group')
-        if desc_el: result["description"] = clean_description(desc_el.get_text(separator='\n'))
+        # Company
+        card_company = soup.select_one('.card-company')
+        if card_company:
+            img_el = card_company.select_one('img')
+            if img_el and img_el.get('alt'):
+                result["company"] = img_el.get('alt').strip()
+            else:
+                for h in card_company.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div']):
+                    text = h.get_text().strip()
+                    if text and text != "Xem thông tin công ty" and len(text) > 3 and len(text) < 100:
+                        result["company"] = text
+                        break
+        if result["company"] == "N/A":
+            comp_el = soup.select_one('.company-name, .employer-name')
+            if comp_el:
+                result["company"] = comp_el.text.strip()
+        if result["company"] == "N/A":
+            for a in soup.find_all('a', href=True):
+                if "/tuyen-dung/" in a['href']:
+                    text = a.text.strip()
+                    if text and text != "Xem thông tin công ty" and len(text) > 3:
+                        result["company"] = text
+                        break
+        
+        desc_el = soup.select_one('.job-detail-card, .job-description, .content-group')
+        if desc_el:
+            result["description"] = clean_description(desc_el.get_text(separator='\n'))
+            
+        # Metadata parsing (salary, experience, location, date_posted, expiry_date)
+        for el in soup.find_all(['li', 'span', 'div', 'p']):
+            txt = el.get_text(separator=' ').strip()
+            txt_clean = re.sub(r'\s+', ' ', txt)
+            if txt_clean.startswith("Mức lương:") or txt_clean.startswith("Lương:"):
+                val = txt_clean.split(":")[-1].strip()
+                if val: result["salary"] = val
+            elif txt_clean.startswith("Kinh nghiệm:"):
+                val = txt_clean.split(":")[-1].strip()
+                if val: result["experience"] = val
+            elif txt_clean.startswith("Địa điểm:"):
+                val = txt_clean.split(":")[-1].strip()
+                if val: result["location"] = val
+            elif txt_clean.startswith("Hạn nộp:") or txt_clean.startswith("Hạn nộp hồ sơ:"):
+                val = txt_clean.split(":")[-1].strip()
+                if val: result["expiry_date"] = val
+            elif txt_clean.startswith("Ngày đăng tuyển:") or txt_clean.startswith("Ngày đăng:"):
+                val = txt_clean.split(":")[-1].strip()
+                if val: result["date_posted"] = val
 
     elif platform_name == "YBox":
         title_el = soup.select_one('.article-title, h1, .title-post')
@@ -766,6 +885,7 @@ if __name__ == "__main__":
 
     query_kebab = search_query.lower().replace(" ", "-")
     query_encoded = search_query.replace(" ", "%20")
+    query_slug = remove_accents(search_query)
 
     targets = [
         {"name": "ITViec", "url": f"https://itviec.com/it-jobs/{query_kebab}"},
@@ -776,7 +896,7 @@ if __name__ == "__main__":
         {"name": "Glints", "url": f"https://glints.com/vn/opportunities/jobs/explore?keyword={query_encoded}&country=VN"},
         {"name": "YBox", "url": f"https://ybox.vn/tuyen-dung-viec-lam-tk-c1?keyword={query_encoded}"},
         {"name": "StudentJob", "url": f"https://studentjob.vn/viec-lam?key={query_encoded}"},
-        {"name": "Jobsgo", "url": f"https://jobsgo.vn/viec-lam?q={query_encoded}"}
+        {"name": "Jobsgo", "url": f"https://jobsgo.vn/nganh-nghe.html?slug=viec-lam-{query_slug}"}
     ]
 
     print("[START] BAT DAU KHOI CHAY TOOL CAREER TRACKER (Parallel Engine)\n" + "-"*50)
