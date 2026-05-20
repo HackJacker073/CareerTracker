@@ -72,7 +72,7 @@ WORKSHEET_NAME=Job
 ### 4. Execution
 Launch the pipeline via Terminal:
 ```bash
-python src/career-tracker.py
+python src/career_tracker.py
 ```
 *Note: Upon first run, the tool will automatically initialize the worksheet headers if they do not exist.*
 
