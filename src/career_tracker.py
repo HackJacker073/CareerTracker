@@ -326,7 +326,7 @@ def parse_salary_from_text(text):
     text_clean = text.lower().replace(",", "").replace(".", "")
     
     # 1. Regex tìm khoảng lương: e.g. "15 - 20 triệu", "1000 - 2000 usd", "15tr - 20tr"
-    range_pattern = r'(\d+)\s*(?:-|đến|to|~)\s*(\d+)\s*(triệu|tr|usd|\$|vnđ|vnd|k)?'
+    range_pattern = r'(\d+)\s*(?:-|–|—|đến|to|~)\s*(\d+)\s*(triệu|tr|usd|\$|vnđ|vnd|k)?'
     match = re.search(range_pattern, text_clean)
     if match:
         try:
@@ -952,11 +952,80 @@ def extract_job_details(platform_name, soup, url):
                 if val: result["date_posted"] = val
 
     elif platform_name == "YBox":
-        title_el = soup.select_one('.article-title, h1, .title-post')
-        result["title"] = title_el.text.strip() if title_el else result["title"]
-        
-        desc_el = soup.select_one('.article-content, .post-content, .content-detail')
-        if desc_el: result["description"] = clean_description(desc_el.get_text(separator='\n'))
+        # Extract from React initial state script tag since YBox details are rendered client-side
+        script = soup.find('script', string=re.compile(r'window\.__INITIAL_STATE__\s*='))
+        if script:
+            try:
+                script_text = script.string or script.text
+                clean_text = script_text.strip()
+                if clean_text.startswith('window.__INITIAL_STATE__'):
+                    clean_text = clean_text[len('window.__INITIAL_STATE__'):].strip()
+                if clean_text.startswith('='):
+                    clean_text = clean_text[1:].strip()
+                
+                # Decode JSON using raw_decode to ignore trailing Javascript code
+                decoder = json.JSONDecoder()
+                state, _ = decoder.raw_decode(clean_text)
+                
+                post = state.get('SinglePostPage', {}).get('post', {})
+                if post:
+                    # 1. Title
+                    jobs = post.get('jobs', [])
+                    if jobs and jobs[0].get('title'):
+                        result["title"] = jobs[0].get('title').strip()
+                    elif post.get('title'):
+                        result["title"] = post.get('title').strip()
+                        
+                    # 2. Company
+                    if post.get('nameCompany'):
+                        result["company"] = post.get('nameCompany').strip()
+                    elif post.get('company', {}).get('name'):
+                        result["company"] = post.get('company', {}).get('name').strip()
+                        
+                    # 3. Description (Combine summary, job description, requirements, and benefits)
+                    desc_parts = []
+                    if post.get('summary'):
+                        desc_parts.append(post.get('summary').strip())
+                    
+                    if jobs:
+                        job = jobs[0]
+                        if job.get('mota'):
+                            mota_clean = BeautifulSoup(job.get('mota'), 'html.parser').get_text(separator='\n').strip()
+                            if mota_clean:
+                                desc_parts.append(f"Mô tả công việc:\n{mota_clean}")
+                        if job.get('yeucau'):
+                            yeucau_clean = BeautifulSoup(job.get('yeucau'), 'html.parser').get_text(separator='\n').strip()
+                            if yeucau_clean:
+                                desc_parts.append(f"Yêu cầu công việc:\n{yeucau_clean}")
+                        if job.get('chinhsach'):
+                            chinhsach_clean = BeautifulSoup(job.get('chinhsach'), 'html.parser').get_text(separator='\n').strip()
+                            if chinhsach_clean:
+                                desc_parts.append(f"Quyền lợi & Chính sách:\n{chinhsach_clean}")
+                                
+                    if desc_parts:
+                        result["description"] = clean_description("\n\n".join(desc_parts))
+                        
+                    # 4. Date Posted (Format e.g. "Tue May 19 2026 19:09:37 GMT+0700" to "2026-05-19")
+                    months = {"Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04", "May": "05", "Jun": "06",
+                              "Jul": "07", "Aug": "08", "Sep": "09", "Oct": "10", "Nov": "11", "Dec": "12"}
+                    
+                    def format_ybox_date(dt_str):
+                        if not dt_str:
+                            return "N/A"
+                        if 'T' in dt_str and '-' in dt_str:
+                            return dt_str.split('T')[0]
+                        parts = dt_str.split()
+                        if len(parts) >= 4:
+                            if parts[1] in months:
+                                return f"{parts[3]}-{months[parts[1]]}-{parts[2].zfill(2)}"
+                            elif parts[0] in months:
+                                return f"{parts[2]}-{months[parts[0]]}-{parts[1].zfill(2)}"
+                        return dt_str
+                        
+                    result["date_posted"] = format_ybox_date(post.get('publishedAt') or post.get('acceptedAt'))
+                    result["expiry_date"] = format_ybox_date(post.get('deadline'))
+            except Exception as e:
+                print(f"    [!] Lỗi phân tích state JSON YBox: {e}")
 
     # --- GENERIC FALLBACK FOR UNMAPPED PLATFORMS ---
     if result["description"] == "N/A":
@@ -1203,22 +1272,31 @@ def scrape_platform(platform_name, search_url, search_query):
             
         def fetch_detail_worker(link):
             current_soup = None
-            try:
-                import cloudscraper
-                scraper = cloudscraper.create_scraper()
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                    "Accept-Language": "vi,en-US;q=0.9,en;q=0.8",
-                }
-                resp = scraper.get(link, headers=headers, timeout=12)
-                if resp.status_code == 200:
-                    current_soup = BeautifulSoup(resp.text, 'html.parser')
-            except Exception:
-                pass
+            
+            # Chỉ thử cào qua HTTP đối với các trang thân thiện/ít chặn
+            http_friendly_platforms = ["VietnamWorks", "YBox", "StudentJob"]
+            
+            if platform_name in http_friendly_platforms:
+                try:
+                    import cloudscraper
+                    scraper = cloudscraper.create_scraper()
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                        "Accept-Language": "vi,en-US;q=0.9,en;q=0.8",
+                    }
+                    resp = scraper.get(link, headers=headers, timeout=12)
+                    if resp.status_code == 200:
+                        current_soup = BeautifulSoup(resp.content, 'html.parser')
+                except Exception:
+                    pass
+                
+                if not current_soup:
+                    print(f"    [!] Trực tiếp HTTP lỗi/bị chặn, dùng Selenium fallback cho: {link}")
+            else:
+                print(f"    [*] Nền tảng {platform_name} yêu cầu trình duyệt, dùng Selenium cho: {link}")
                 
             if not current_soup:
-                print(f"    [!] Trực tiếp HTTP lỗi/bị chặn, dùng Selenium fallback cho: {link}")
                 temp_driver = None
                 try:
                     temp_driver = get_driver(use_undetected=use_uc, headless=True)
