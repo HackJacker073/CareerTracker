@@ -117,6 +117,395 @@ def clean_description(text):
     compact_text = '\n'.join([l for l in lines if l])
     return compact_text
 
+# --- CÁC HÀM CHUẨN HÓA DỮ LIỆU ĐA PHƯƠNG THỨC ---
+
+def text_based_dom_scan(soup):
+    scanned = {
+        "location": None,
+        "salary": None,
+        "experience": None,
+        "working_model": None,
+        "job_level": None,
+        "expiry_date": None,
+        "date_posted": None
+    }
+    if not soup:
+        return scanned
+        
+    for el in soup.find_all(['div', 'li', 'span', 'p', 'td', 'tr']):
+        try:
+            text = el.get_text(separator=' ').strip()
+            if len(text) > 300:
+                continue
+            text_clean = re.sub(r'\s+', ' ', text)
+            
+            # Check for Salary
+            if any(kw in text_clean for kw in ["Mức lương:", "Lương:", "Salary:"]) and not scanned["salary"]:
+                val = text_clean.split(":")[-1].strip()
+                if val and len(val) < 100 and val.lower() not in ["mức lương", "lương", "salary"]:
+                    scanned["salary"] = val
+                    
+            # Check for Experience
+            if any(kw in text_clean for kw in ["Kinh nghiệm:", "Yêu cầu kinh nghiệm:", "Experience:"]) and not scanned["experience"]:
+                val = text_clean.split(":")[-1].strip()
+                if val and len(val) < 100 and val.lower() not in ["kinh nghiệm", "experience"]:
+                    scanned["experience"] = val
+                    
+            # Check for Location
+            if any(kw in text_clean for kw in ["Địa điểm:", "Khu vực:", "Địa điểm làm việc:", "Địa chỉ:", "Location:"]) and not scanned["location"]:
+                val = text_clean.split(":")[-1].strip()
+                if val and len(val) < 200 and val.lower() not in ["địa điểm", "location"]:
+                    scanned["location"] = val
+                    
+            # Check for Working Model / Form
+            if any(kw in text_clean for kw in ["Hình thức làm việc:", "Hình thức:", "Working model:"]) and not scanned["working_model"]:
+                val = text_clean.split(":")[-1].strip()
+                if val and len(val) < 100:
+                    scanned["working_model"] = val
+                    
+            # Check for Expiry Date
+            if any(kw in text_clean for kw in ["Hạn nộp hồ sơ:", "Hạn nộp:", "Hạn nhận hồ sơ:", "Deadline:"]) and not scanned["expiry_date"]:
+                val = text_clean.split(":")[-1].strip()
+                if val and len(val) < 50:
+                    scanned["expiry_date"] = val
+                    
+            # Check for Date Posted
+            if any(kw in text_clean for kw in ["Ngày đăng:", "Ngày đăng tuyển:", "Posted:"]) and not scanned["date_posted"]:
+                val = text_clean.split(":")[-1].strip()
+                if val and len(val) < 50:
+                    scanned["date_posted"] = val
+        except:
+            continue
+            
+    return scanned
+
+def normalize_location(raw_val, title="", desc=""):
+    def search_keywords(text):
+        if not text:
+            return None
+        text_lower = text.lower()
+        if any(w in text_lower for w in ["hồ chí minh", "hcm", "sài gòn", "saigon", "tp.hcm", "tphcm"]):
+            return "Hồ Chí Minh"
+        if any(w in text_lower for w in ["hà nội", "hn", "ha noi", "ha_noi"]):
+            return "Hà Nội"
+        if any(w in text_lower for w in ["đà nẵng", "dn", "da nang"]):
+            return "Đà Nẵng"
+        if any(w in text_lower for w in ["bình dương", "binh duong"]):
+            return "Bình Dương"
+        if any(w in text_lower for w in ["đồng nai", "dong nai"]):
+            return "Đồng Nai"
+        if any(w in text_lower for w in ["cần thơ", "can tho"]):
+            return "Cần Thơ"
+        if any(w in text_lower for w in ["hải phòng", "hai phong"]):
+            return "Hải Phòng"
+        if any(w in text_lower for w in ["toàn quốc", "việt nam", "vietnam", "cả nước"]):
+            return "Toàn quốc"
+        
+        # Quận huyện báo hiệu tỉnh thành
+        if any(w in text_lower for w in ["cầu giấy", "ba đình", "đống đa", "hai bà trưng", "hoàn kiếm", "thanh xuân", "hà đông", "từ liêm", "long biên"]):
+            return "Hà Nội"
+        if any(w in text_lower for w in ["quận 1", "quận 3", "quận 7", "quận 2", "quận 9", "thủ đức", "bình thạnh", "tân bình", "phú nhuận", "gò vấp"]):
+            return "Hồ Chí Minh"
+        return None
+
+    res = search_keywords(raw_val)
+    if res:
+        return res
+    res = search_keywords(title)
+    if res:
+        return res
+    res = search_keywords(desc)
+    if res:
+        return res
+    
+    if raw_val and raw_val.strip() != "N/A":
+        cleaned = re.sub(r'[\-\:]', '', raw_val).strip()
+        return cleaned if cleaned else "Khác"
+    return "Khác"
+
+def scale_salary(val1, val2, unit):
+    multiplier = 1
+    currency = "VND"
+    if not unit:
+        unit = "triệu"
+        
+    if unit in ["triệu", "tr"]:
+        multiplier = 1000000
+        currency = "VND"
+    elif unit in ["usd", "$"]:
+        multiplier = 1
+        currency = "USD"
+    elif unit == "k":
+        if val1 < 100:
+            multiplier = 1000  # 1k USD
+            currency = "USD"
+        else:
+            multiplier = 1000  # 50k VND
+            currency = "VND"
+    elif unit in ["vnđ", "vnd"]:
+        multiplier = 1
+        currency = "VND"
+        
+    v1 = val1 * multiplier if val1 is not None else None
+    v2 = val2 * multiplier if val2 is not None else None
+    return v1, v2, currency
+
+def parse_salary_from_text(text):
+    if not text:
+        return None, None, None
+    
+    # Chuẩn hoá cơ bản, bỏ dấu phân cách hàng ngàn để dễ regex
+    text_clean = text.lower().replace(",", "").replace(".", "")
+    
+    # 1. Regex tìm khoảng lương: e.g. "15 - 20 triệu", "1000 - 2000 usd", "15tr - 20tr"
+    range_pattern = r'(\d+)\s*(?:-|đến|to|~)\s*(\d+)\s*(triệu|tr|usd|\$|vnđ|vnd|k)?'
+    match = re.search(range_pattern, text_clean)
+    if match:
+        try:
+            val1 = float(match.group(1))
+            val2 = float(match.group(2))
+            unit = match.group(3)
+            
+            if not unit:
+                if any(w in text_clean for w in ["triệu", "tr"]): unit = "triệu"
+                elif any(w in text_clean for w in ["usd", "$"]): unit = "usd"
+                elif "k" in text_clean: unit = "k"
+                else:
+                    if val2 <= 100: unit = "triệu"
+                    elif val2 <= 5000: unit = "usd"
+                    else: unit = "vnd"
+            min_v, max_v, curr = scale_salary(val1, val2, unit)
+            return min_v, max_v, curr
+        except:
+            pass
+
+    # 2. Regex tìm lương đơn (từ/lên đến/...)
+    single_pattern = r'(?:từ|lên đến|đến|tới|dưới|trên|up to|upto|khoảng)\s*(\d+)\s*(triệu|tr|usd|\$|vnđ|vnd|k)?'
+    match = re.search(single_pattern, text_clean)
+    if match:
+        try:
+            val = float(match.group(1))
+            unit = match.group(2)
+            
+            if not unit:
+                if any(w in text_clean for w in ["triệu", "tr"]): unit = "triệu"
+                elif any(w in text_clean for w in ["usd", "$"]): unit = "usd"
+                elif "k" in text_clean: unit = "k"
+                else:
+                    if val <= 100: unit = "triệu"
+                    elif val <= 5000: unit = "usd"
+                    else: unit = "vnd"
+            
+            min_v, max_v, curr = scale_salary(val, None, unit)
+            if any(w in text_clean for w in ["lên đến", "upto", "đến", "tới", "dưới"]):
+                return None, min_v, curr
+            else:
+                return min_v, None, curr
+        except:
+            pass
+            
+    # 3. Tìm số thuần tuý nếu có dạng lương VND đầy đủ (e.g. 15000000)
+    raw_pattern = r'(\d{7,10})'
+    match = re.search(raw_pattern, text_clean)
+    if match:
+        try:
+            val = float(match.group(1))
+            return val, val, "VND"
+        except:
+            pass
+            
+    return None, None, None
+
+def normalize_salary(raw_val, title="", desc=""):
+    raw_clean = re.sub(r'\s+', ' ', raw_val).strip() if raw_val else ""
+    
+    min_s, max_s, curr = parse_salary_from_text(raw_clean)
+    
+    if min_s is None and max_s is None:
+        min_s, max_s, curr = parse_salary_from_text(title)
+        
+    if min_s is None and max_s is None and desc and desc != "N/A":
+        # Quét các dòng có từ khoá lương để tránh nhiễu
+        for line in desc.split('\n'):
+            if any(w in line.lower() for w in ["lương", "thu nhập", "salary", "mức lương"]):
+                min_s, max_s, curr = parse_salary_from_text(line)
+                if min_s is not None or max_s is not None:
+                    break
+                    
+    min_vnd = None
+    max_vnd = None
+    USD_RATE = 25000
+    
+    if min_s is not None:
+        min_vnd = min_s * USD_RATE if curr == "USD" else min_s
+    if max_s is not None:
+        max_vnd = max_s * USD_RATE if curr == "USD" else max_s
+        
+    display_str = "Thỏa thuận"
+    if min_s is not None and max_s is not None:
+        if curr == "USD":
+            display_str = f"{int(min_s):,} - {int(max_s):,} USD"
+        else:
+            display_str = f"{min_s/1000000:g} - {max_s/1000000:g} Triệu VND"
+    elif min_s is not None:
+        if curr == "USD":
+            display_str = f"Từ {int(min_s):,} USD"
+        else:
+            display_str = f"Từ {min_s/1000000:g} Triệu VND"
+    elif max_s is not None:
+        if curr == "USD":
+            display_str = f"Lên đến {int(max_s):,} USD"
+        else:
+            display_str = f"Lên đến {max_s/1000000:g} Triệu VND"
+    else:
+        if raw_clean and raw_clean != "N/A":
+            display_str = raw_clean
+            
+    return (
+        int(min_vnd) if min_vnd is not None else "",
+        int(max_vnd) if max_vnd is not None else "",
+        display_str
+    )
+
+def parse_experience_from_text(text):
+    if not text:
+        return None, None
+    text_lower = text.lower()
+    
+    if any(w in text_lower for w in ["không yêu cầu", "không cần", "chưa có kinh nghiệm", "no experience", "fresh", "mới tốt nghiệp", "tts", "intern"]):
+        return 0, 0
+        
+    # Khoảng kinh nghiệm
+    range_pattern = r'(\d+)\s*(?:-|đến|to|~)\s*(\d+)\s*(?:năm|years?|y)'
+    match = re.search(range_pattern, text_lower)
+    if match:
+        try:
+            return int(match.group(1)), int(match.group(2))
+        except:
+            pass
+            
+    # Kinh nghiệm đơn
+    single_pattern = r'(?:từ|trên|tối thiểu|ít nhất|có|dưới|khoảng|yêu cầu)?\s*(\d+)\s*(?:\+)?\s*(?:năm|years?|y)'
+    match = re.search(single_pattern, text_lower)
+    if match:
+        try:
+            val = int(match.group(1))
+            if "dưới" in text_lower:
+                return 0, val
+            elif any(w in text_lower for w in ["trên", "tối thiểu", "ít nhất", "+"]):
+                return val, None
+            else:
+                return val, val
+        except:
+            pass
+            
+    return None, None
+
+def normalize_experience(raw_val, title="", desc=""):
+    raw_clean = re.sub(r'\s+', ' ', raw_val).strip() if raw_val else ""
+    
+    min_e, max_e = parse_experience_from_text(raw_clean)
+    
+    if min_e is None and max_e is None:
+        min_e, max_e = parse_experience_from_text(title)
+        
+    if min_e is None and max_e is None and desc and desc != "N/A":
+        for line in desc.split('\n'):
+            if any(w in line.lower() for w in ["kinh nghiệm", "experience", "năm exp"]):
+                min_e, max_e = parse_experience_from_text(line)
+                if min_e is not None or max_e is not None:
+                    break
+                    
+    display_str = "N/A"
+    if min_e is not None and max_e is not None:
+        if min_e == 0 and max_e == 0:
+            display_str = "Không yêu cầu"
+        elif min_e == max_e:
+            display_str = f"{min_e} năm"
+        else:
+            display_str = f"{min_e} - {max_e} năm"
+    elif min_e is not None:
+        display_str = f"Từ {min_e} năm"
+    elif max_e is not None:
+        display_str = f"Dưới {max_e} năm"
+    else:
+        if raw_clean and raw_clean != "N/A":
+            display_str = raw_clean
+            
+    return (
+        min_e if min_e is not None else "",
+        max_e if max_e is not None else "",
+        display_str
+    )
+
+def normalize_work_type_model(raw_val, title="", desc=""):
+    combined = f"{raw_val} {title} {desc}".lower()
+    
+    work_type = "Toàn thời gian"
+    if any(w in combined for w in ["thực tập", "intern", "tts", "apprentice"]):
+        work_type = "Thực tập"
+    elif any(w in combined for w in ["bán thời gian", "part-time", "part time", "parttime"]):
+        work_type = "Bán thời gian"
+    elif any(w in combined for w in ["toàn thời gian", "full-time", "full time", "fulltime"]):
+        work_type = "Toàn thời gian"
+        
+    work_model = "Onsite"
+    if any(w in combined for w in ["remote", "từ xa", "work from home", "wfh", "tại nhà"]):
+        work_model = "Remote"
+    elif any(w in combined for w in ["hybrid", "linh hoạt", "kết hợp"]):
+        work_model = "Hybrid"
+    elif any(w in combined for w in ["onsite", "tại văn phòng", "làm tại công ty", "làm tại văn phòng"]):
+        work_model = "Onsite"
+        
+    return work_type, work_model
+
+def normalize_job_level(raw_val, title="", desc=""):
+    combined = f"{raw_val} {title} {desc}".lower()
+    
+    if any(w in combined for w in ["trưởng phòng", "giám đốc", "manager", "director", "head of", "lead", "trưởng nhóm", "leader", "principal"]):
+        return "Trưởng nhóm / Quản lý"
+    if any(w in combined for w in ["senior", "sr", "cấp cao"]):
+        return "Senior"
+    if any(w in combined for w in ["middle", "mid"]):
+        return "Middle"
+    if any(w in combined for w in ["junior", "jr"]):
+        return "Junior"
+    if any(w in combined for w in ["fresher", "mới tốt nghiệp", "entry"]):
+        return "Fresher"
+    if any(w in combined for w in ["thực tập sinh", "intern", "tts"]):
+        return "Thực tập sinh"
+        
+    return "Junior / Middle"
+
+def normalize_job_data(job):
+    title = job.get("title", "")
+    desc = job.get("description", "")
+    
+    # 1. Địa điểm
+    job["location_normalized"] = normalize_location(job.get("location", ""), title, desc)
+    
+    # 2. Lương
+    min_sal, max_sal, sal_normalized = normalize_salary(job.get("salary", ""), title, desc)
+    job["salary_min"] = min_sal
+    job["salary_max"] = max_sal
+    job["salary_normalized"] = sal_normalized
+    
+    # 3. Kinh nghiệm
+    min_exp, max_exp, exp_normalized = normalize_experience(job.get("experience", ""), title, desc)
+    job["exp_min"] = min_exp
+    job["exp_max"] = max_exp
+    job["experience_normalized"] = exp_normalized
+    
+    # 4. Hình thức & Mô hình làm việc
+    work_type, work_model = normalize_work_type_model("", title, desc)
+    job["work_type"] = work_type
+    job["work_model"] = work_model
+    
+    # 5. Cấp bậc
+    job["job_level"] = normalize_job_level("", title, desc)
+    
+    return job
+
 # --- HÀM CHI TIẾT ---
 def extract_job_details(platform_name, soup, url):
     # Dữ liệu mặc định
@@ -317,23 +706,53 @@ def extract_job_details(platform_name, soup, url):
         if desc_el: result["description"] = clean_description(desc_el.get_text(separator='\n'))
 
     elif platform_name == "TopCV":
-        title_el = soup.select_one('h1.job-detail__info--title, .job-title, h1')
-        result["title"] = title_el.text.strip() if title_el else result["title"]
-        comp_el = soup.select_one('.company-name, .job-detail__company--name')
-        result["company"] = comp_el.text.strip() if comp_el else result["company"]
-        
-        info_items = soup.select('.job-detail__info--section-content, .job-detail__info-item, .box-main-info')
+        # 1. Tìm tiêu đề (Title) qua nhiều selectors khác nhau
+        for sel in ['h1.job-detail__info--title', '.job-title', 'h1.job-title', '.job-detail-header-title', '.job-header-info-title', 'h1', 'h2.job-title']:
+            el = soup.select_one(sel)
+            if el and el.text.strip():
+                result["title"] = el.text.strip()
+                break
+                
+        # 2. Tìm tên công ty (Company) qua nhiều selectors
+        for sel in ['.company-name', '.job-detail__company--name', 'a.company-name', '.company-title', '.job-company-name', '.company-info a', 'h2.company-name']:
+            el = soup.select_one(sel)
+            if el and el.text.strip():
+                result["company"] = el.text.strip()
+                break
+                
+        # 3. Tìm mô tả công việc (Description) qua nhiều selectors
+        for sel in ['.job-description', '.job-detail__information-detail', '.job-data', '.job-detail-description', '#job-detail-requirements', '.box-job-requirements']:
+            el = soup.select_one(sel)
+            if el and el.text.strip():
+                result["description"] = clean_description(el.get_text(separator='\n'))
+                break
+                
+        # 4. Tìm các thông tin khác qua selectors truyền thống
+        info_items = soup.select('.job-detail__info--section-content, .job-detail__info-item, .box-main-info, .box-info')
         for item in info_items:
             text = item.get_text(separator=' ').strip()
             if "Địa điểm" in text or "Khu vực" in text:
-                result["location"] = text.split(':')[-1].strip()
+                val = text.split(':')[-1].strip()
+                if val: result["location"] = val
             elif "Mức lương" in text:
-                result["salary"] = text.split(':')[-1].strip()
+                val = text.split(':')[-1].strip()
+                if val: result["salary"] = val
             elif "Kinh nghiệm" in text:
-                result["experience"] = text.split(':')[-1].strip()
+                val = text.split(':')[-1].strip()
+                if val: result["experience"] = val
 
-        desc_el = soup.select_one('.job-description, .job-detail__information-detail')
-        if desc_el: result["description"] = clean_description(desc_el.get_text(separator='\n'))
+        # 5. Dò thêm bằng DOM text walk nếu các trường vẫn là mặc định hoặc N/A
+        scanned = text_based_dom_scan(soup)
+        if (result["location"] == "N/A" or not result["location"]) and scanned["location"]:
+            result["location"] = scanned["location"]
+        if (result["salary"] in ["Thỏa thuận", "N/A"] or not result["salary"]) and scanned["salary"]:
+            result["salary"] = scanned["salary"]
+        if (result["experience"] == "N/A" or not result["experience"]) and scanned["experience"]:
+            result["experience"] = scanned["experience"]
+        if (result["expiry_date"] == "N/A" or not result["expiry_date"]) and scanned["expiry_date"]:
+            result["expiry_date"] = scanned["expiry_date"]
+        if (result["date_posted"] == "N/A" or not result["date_posted"]) and scanned["date_posted"]:
+            result["date_posted"] = scanned["date_posted"]
 
     elif platform_name == "Vieclam24h":
         result["title"] = soup.select_one('h1, .job-title').text.strip() if soup.select_one('h1, .job-title') else result["title"]
@@ -448,6 +867,19 @@ def extract_job_details(platform_name, soup, url):
         generic_desc = soup.select_one('.job-description, .description, .content, #job-details, .detail-content, .job-detail')
         if generic_desc:
             result["description"] = clean_description(generic_desc.get_text(separator='\n'))
+
+    # --- DOM TEXT WALK FALLBACK FOR ALL PLATFORMS ---
+    scanned_fallback = text_based_dom_scan(soup)
+    if (result["location"] == "N/A" or not result["location"]) and scanned_fallback["location"]:
+        result["location"] = scanned_fallback["location"]
+    if (result["salary"] in ["Thỏa thuận", "N/A"] or not result["salary"]) and scanned_fallback["salary"]:
+        result["salary"] = scanned_fallback["salary"]
+    if (result["experience"] == "N/A" or not result["experience"]) and scanned_fallback["experience"]:
+        result["experience"] = scanned_fallback["experience"]
+    if (result["expiry_date"] == "N/A" or not result["expiry_date"]) and scanned_fallback["expiry_date"]:
+        result["expiry_date"] = scanned_fallback["expiry_date"]
+    if (result["date_posted"] == "N/A" or not result["date_posted"]) and scanned_fallback["date_posted"]:
+        result["date_posted"] = scanned_fallback["date_posted"]
 
     # --- FALLBACK EXTRACTION FROM DESCRIPTION ---
     if result["description"] != "N/A":
@@ -838,11 +1270,33 @@ def push_to_sheets(all_jobs, sheet_name):
             worksheet.clear()
             print(f"  [*] Đã tìm thấy trang tính '{sheet_name}', tiến hành ghi đè dữ liệu.")
         except gspread.exceptions.WorksheetNotFound:
-            worksheet = sh.add_worksheet(title=sheet_name, rows="100", cols="20")
+            worksheet = sh.add_worksheet(title=sheet_name, rows="100", cols="25")
             print(f"  [*] Đã tạo trang tính mới: '{sheet_name}'.")
 
-        header = ["Thời gian quét", "Nền tảng", "Tiêu đề", "Công ty", "Địa điểm", "Mức lương", "Kinh nghiệm", "Ngày đăng", "Ngày hết hạn", "Mô tả", "URL"]
-        worksheet.update('A1', [header])
+        header = [
+            "Thời gian quét", 
+            "Nền tảng", 
+            "Tiêu đề", 
+            "Công ty", 
+            "Địa điểm tuyển dụng", 
+            "Địa điểm (Chuẩn hóa)", 
+            "Mức lương gốc", 
+            "Mức lương tối thiểu (VND)", 
+            "Mức lương tối đa (VND)", 
+            "Mức lương (Chuẩn hóa)", 
+            "Kinh nghiệm gốc", 
+            "Kinh nghiệm tối thiểu (năm)", 
+            "Kinh nghiệm tối đa (năm)", 
+            "Kinh nghiệm (Chuẩn hóa)", 
+            "Hình thức làm việc", 
+            "Mô hình làm việc", 
+            "Cấp bậc", 
+            "Ngày đăng", 
+            "Ngày hết hạn", 
+            "Mô tả", 
+            "URL"
+        ]
+        worksheet.update(values=[header], range_name='A1')
         # Cố định tiêu đề cột (dòng 1)
         worksheet.freeze(rows=1)
         
@@ -854,8 +1308,18 @@ def push_to_sheets(all_jobs, sheet_name):
                 j.get("title", ""), 
                 j.get("company", ""), 
                 j.get("location", ""), 
+                j.get("location_normalized", "Khác"), 
                 j.get("salary", "Thỏa thuận"), 
+                j.get("salary_min", ""), 
+                j.get("salary_max", ""), 
+                j.get("salary_normalized", "Thỏa thuận"), 
                 j.get("experience", "N/A"),
+                j.get("exp_min", ""),
+                j.get("exp_max", ""),
+                j.get("experience_normalized", "N/A"),
+                j.get("work_type", "N/A"),
+                j.get("work_model", "Onsite"),
+                j.get("job_level", "N/A"),
                 j.get("date_posted", "N/A"), 
                 j.get("expiry_date", "N/A"), 
                 j.get("description", ""), 
@@ -919,7 +1383,12 @@ if __name__ == "__main__":
                     for pj in platform_jobs:
                         if pj:
                             pj["platform"] = platform_name
-                            all_extracted_jobs.append(pj)
+                            try:
+                                normalized_job = normalize_job_data(pj)
+                                all_extracted_jobs.append(normalized_job)
+                            except Exception as norm_err:
+                                print(f"      [!] Lỗi chuẩn hóa dữ liệu tin: {norm_err}")
+                                all_extracted_jobs.append(pj)
                 print(f"[FINISHED] Đã hoàn thành quét {platform_name}")
             except Exception as exc:
                 print(f"[!] {platform_name} phát sinh lỗi ngoại lệ: {exc}")
