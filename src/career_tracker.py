@@ -63,6 +63,58 @@ def remove_accents(input_str):
 SHEET_ID = os.getenv("SHEET_ID")
 WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "Job")
 
+def get_chrome_major_version():
+    """
+    Tự động phát hiện phiên bản Chrome lớn (major version) đã cài đặt trên máy.
+    """
+    import sys
+    import os
+    import re
+    import subprocess
+    
+    # 1. Thử đọc registry trên Windows
+    if sys.platform == "win32":
+        import winreg
+        for hkey in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                key = winreg.OpenKey(hkey, r"Software\Google\Chrome\BLBeacon")
+                version, _ = winreg.QueryValueEx(key, "version")
+                key.Close()
+                if version:
+                    major = int(version.split('.')[0])
+                    if major > 0:
+                        return major
+            except Exception:
+                pass
+                
+            try:
+                key = winreg.OpenKey(hkey, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe")
+                path, _ = winreg.QueryValueEx(key, "")
+                key.Close()
+                if path and os.path.exists(path):
+                    app_dir = os.path.dirname(path)
+                    for item in os.listdir(app_dir):
+                        if os.path.isdir(os.path.join(app_dir, item)) and re.match(r'^\d+\.', item):
+                            major = int(item.split('.')[0])
+                            if major > 0:
+                                return major
+            except Exception:
+                pass
+
+    # 2. Thử chạy executable của Chrome hoặc tìm trong PATH (macOS / Linux / generic fallback)
+    try:
+        from undetected_chromedriver import find_chrome_executable
+        chrome_path = find_chrome_executable()
+        if chrome_path:
+            output = subprocess.check_output([chrome_path, "--version"], stderr=subprocess.STDOUT, text=True)
+            match = re.search(r'Chrom\w*\s+(\d+)\.', output)
+            if match:
+                return int(match.group(1))
+    except Exception:
+        pass
+        
+    return None
+
 # --- CẤU HÌNH SELENIUM ---
 def get_driver(use_undetected=True, headless=True):
     if use_undetected:
@@ -76,7 +128,12 @@ def get_driver(use_undetected=True, headless=True):
             options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
             options.add_argument("--disable-blink-features=AutomationControlled")
             
-            driver = uc.Chrome(options=options, headless=headless)
+            major_version = get_chrome_major_version()
+            if major_version:
+                print(f"  [*] Đã phát hiện phiên bản Chrome: {major_version}")
+                driver = uc.Chrome(options=options, headless=headless, version_main=major_version)
+            else:
+                driver = uc.Chrome(options=options, headless=headless)
     else:
         print(f"  [*] Khởi tạo Selenium chuẩn (headless={headless})...")
         options = SeleniumOptions()
@@ -118,6 +175,14 @@ def clean_description(text):
     return compact_text
 
 # --- CÁC HÀM CHUẨN HÓA DỮ LIỆU ĐA PHƯƠNG THỨC ---
+
+def safe_str(val):
+    if val is None:
+        return ""
+    if isinstance(val, (dict, list)):
+        import json
+        return json.dumps(val, ensure_ascii=False)
+    return str(val).strip()
 
 def text_based_dom_scan(soup):
     scanned = {
@@ -180,6 +245,9 @@ def text_based_dom_scan(soup):
     return scanned
 
 def normalize_location(raw_val, title="", desc=""):
+    raw_val = safe_str(raw_val)
+    title = safe_str(title)
+    desc = safe_str(desc)
     def search_keywords(text):
         if not text:
             return None
@@ -317,7 +385,10 @@ def parse_salary_from_text(text):
     return None, None, None
 
 def normalize_salary(raw_val, title="", desc=""):
-    raw_clean = re.sub(r'\s+', ' ', raw_val).strip() if raw_val else ""
+    raw_val = safe_str(raw_val)
+    title = safe_str(title)
+    desc = safe_str(desc)
+    raw_clean = re.sub(r'\s+', ' ', raw_val).strip()
     
     min_s, max_s, curr = parse_salary_from_text(raw_clean)
     
@@ -402,7 +473,10 @@ def parse_experience_from_text(text):
     return None, None
 
 def normalize_experience(raw_val, title="", desc=""):
-    raw_clean = re.sub(r'\s+', ' ', raw_val).strip() if raw_val else ""
+    raw_val = safe_str(raw_val)
+    title = safe_str(title)
+    desc = safe_str(desc)
+    raw_clean = re.sub(r'\s+', ' ', raw_val).strip()
     
     min_e, max_e = parse_experience_from_text(raw_clean)
     
@@ -439,6 +513,9 @@ def normalize_experience(raw_val, title="", desc=""):
     )
 
 def normalize_work_type_model(raw_val, title="", desc=""):
+    raw_val = safe_str(raw_val)
+    title = safe_str(title)
+    desc = safe_str(desc)
     combined = f"{raw_val} {title} {desc}".lower()
     
     work_type = "Toàn thời gian"
@@ -460,6 +537,9 @@ def normalize_work_type_model(raw_val, title="", desc=""):
     return work_type, work_model
 
 def normalize_job_level(raw_val, title="", desc=""):
+    raw_val = safe_str(raw_val)
+    title = safe_str(title)
+    desc = safe_str(desc)
     combined = f"{raw_val} {title} {desc}".lower()
     
     if any(w in combined for w in ["trưởng phòng", "giám đốc", "manager", "director", "head of", "lead", "trưởng nhóm", "leader", "principal"]):
@@ -667,17 +747,33 @@ def extract_job_details(platform_name, soup, url):
     # Ưu tiên 2: Dùng JSON-LD (Schema.org)
     json_data = extract_json_ld(soup)
     if json_data:
-        result["title"] = json_data.get('title', result["title"])
-        result["company"] = json_data.get('hiringOrganization', {}).get('name', result["company"])
-        result["date_posted"] = json_data.get('datePosted', result["date_posted"])
+        result["title"] = json_data.get('title') or result["title"]
+        
+        org = json_data.get('hiringOrganization')
+        if org:
+            if isinstance(org, dict):
+                result["company"] = org.get('name') or result["company"]
+            elif isinstance(org, list) and org and isinstance(org[0], dict):
+                result["company"] = org[0].get('name') or result["company"]
+            elif isinstance(org, str):
+                result["company"] = org
+
+        result["date_posted"] = json_data.get('datePosted') or result["date_posted"]
         
         # Salary từ JSON-LD
-        sal = json_data.get('baseSalary', {}).get('value', {})
-        if isinstance(sal, dict):
-            v_min = sal.get('minValue') or sal.get('value')
-            v_max = sal.get('maxValue')
-            if v_min and v_max: result["salary"] = f"{v_min} - {v_max}"
-            elif v_min: result["salary"] = str(v_min)
+        sal_data = json_data.get('baseSalary')
+        if sal_data:
+            if isinstance(sal_data, dict):
+                sal = sal_data.get('value')
+                if isinstance(sal, dict):
+                    v_min = sal.get('minValue') or sal.get('value')
+                    v_max = sal.get('maxValue')
+                    if v_min and v_max: result["salary"] = f"{v_min} - {v_max}"
+                    elif v_min: result["salary"] = str(v_min)
+                elif sal:
+                    result["salary"] = str(sal)
+            elif isinstance(sal_data, str):
+                result["salary"] = sal_data
 
         # Experience từ JSON-LD
         exp_req = json_data.get('experienceRequirements')
@@ -1043,11 +1139,17 @@ def scrape_platform(platform_name, search_url, search_query):
                             if clean_href not in job_links: job_links.append(clean_href)
                 
                 elif platform_name == "Vieclam24h":
-                    elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='/viec-lam/']")
+                    elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='.html']")
                     for el in elements:
-                        href = el.get_attribute("href")
-                        if href and "-p" in href and ".html" in href:
-                            if href not in job_links: job_links.append(href)
+                        try:
+                            href = el.get_attribute("href")
+                            if href:
+                                clean_href = href.split('?')[0]
+                                if re.search(r'id\d+\.html$', clean_href):
+                                    if href not in job_links:
+                                        job_links.append(href)
+                        except Exception:
+                            continue
 
                 elif platform_name == "Glints":
                     driver.execute_script("window.scrollTo(0, 500);")
@@ -1091,33 +1193,68 @@ def scrape_platform(platform_name, search_url, search_query):
 
         # --- TRÍCH XUẤT CHI TIẾT ---
         job_links = list(dict.fromkeys(job_links))[:MAX_JOBS]
-        print(f"[+] Tìm thấy {len(job_links)} jobs tiềm năng tại {platform_name}. Bắt đầu lấy chi tiết...")
-        for link in job_links:
+        print(f"[+] Tìm thấy {len(job_links)} jobs tiềm năng tại {platform_name}. Đóng driver danh sách để giải phóng RAM và bắt đầu lấy chi tiết...")
+        
+        # Đóng driver chính của trang danh sách để giải phóng bộ nhớ
+        try:
+            driver.quit()
+        except:
+            pass
+            
+        def fetch_detail_worker(link):
+            current_soup = None
             try:
-                print(f"  - Đang lấy: {link}")
-                current_soup = None
-                if platform_name == "VietnamWorks":
-                    try:
-                        scraper = cloudscraper.create_scraper()
-                        resp = scraper.get(link, timeout=10)
-                        if resp.status_code == 200: current_soup = BeautifulSoup(resp.text, 'html.parser')
-                    except: pass
+                import cloudscraper
+                scraper = cloudscraper.create_scraper()
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                    "Accept-Language": "vi,en-US;q=0.9,en;q=0.8",
+                }
+                resp = scraper.get(link, headers=headers, timeout=12)
+                if resp.status_code == 200:
+                    current_soup = BeautifulSoup(resp.text, 'html.parser')
+            except Exception:
+                pass
                 
-                if not current_soup:
-                    driver.get(link)
-                    # Giảm thời gian chờ detail xuống 1.5-3s
-                    time.sleep(random.uniform(1.5, 3))
-                    current_soup = BeautifulSoup(driver.page_source, 'html.parser')
-                
-                details = extract_job_details(platform_name, current_soup, link)
-                jobs_data.append(details)
-            except Exception as e:
-                print(f"  [!] Lỗi khi cào link {link}: {e}")
+            if not current_soup:
+                print(f"    [!] Trực tiếp HTTP lỗi/bị chặn, dùng Selenium fallback cho: {link}")
+                temp_driver = None
+                try:
+                    temp_driver = get_driver(use_undetected=use_uc, headless=True)
+                    temp_driver.get(link)
+                    time.sleep(random.uniform(2, 4))
+                    current_soup = BeautifulSoup(temp_driver.page_source, 'html.parser')
+                except Exception as sel_err:
+                    print(f"    [!] Lỗi Selenium fallback cho {link}: {sel_err}")
+                finally:
+                    if temp_driver:
+                        try:
+                            temp_driver.quit()
+                        except:
+                            pass
+            
+            if current_soup:
+                try:
+                    return extract_job_details(platform_name, current_soup, link)
+                except Exception as parse_err:
+                    print(f"    [!] Lỗi phân tích chi tiết của {link}: {parse_err}")
+            return None
+
+        # Sử dụng ThreadPoolExecutor song song với tối đa 3 luồng
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as detail_executor:
+            results = list(detail_executor.map(fetch_detail_worker, job_links))
+            for r in results:
+                if r:
+                    jobs_data.append(r)
 
     except Exception as e:
         print(f"[-] Lỗi hệ thống tại {platform_name}: {e}")
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except:
+            pass
     return jobs_data
 
 def scrape_topcv_dual_engine(keyword):
@@ -1134,7 +1271,11 @@ def scrape_topcv_dual_engine(keyword):
     driver = None
     try:
         # Chạy headless theo yêu cầu
-        driver = uc.Chrome(options=options, headless=True)
+        major_version = get_chrome_major_version()
+        if major_version:
+            driver = uc.Chrome(options=options, headless=True, version_main=major_version)
+        else:
+            driver = uc.Chrome(options=options, headless=True)
         
         # PHƯƠNG ÁN 1: QUÉT SITEMAP
         job_links = []
