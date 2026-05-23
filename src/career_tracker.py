@@ -322,22 +322,29 @@ def parse_salary_from_text(text):
     if not text:
         return None, None, None
     
-    # Chuẩn hoá cơ bản, bỏ dấu phân cách hàng ngàn để dễ regex
-    text_clean = text.lower().replace(",", "").replace(".", "")
+    # 1. Chuyển về chữ thường và loại bỏ khoảng trắng đầu cuối
+    t = text.lower().strip()
+    # 2. Xóa các dấu phân cách hàng nghìn (chấm hoặc phẩy theo sau bởi đúng 3 chữ số)
+    t = re.sub(r'[\.,](?=\d{3}(?!\d))', '', t)
+    # 3. Chuẩn hóa dấu phẩy thập phân thành dấu chấm
+    t = t.replace(",", ".")
     
-    # 1. Regex tìm khoảng lương: e.g. "15 - 20 triệu", "1000 - 2000 usd", "15tr - 20tr"
-    range_pattern = r'(\d+)\s*(?:-|–|—|đến|to|~)\s*(\d+)\s*(triệu|tr|usd|\$|vnđ|vnd|k)?'
-    match = re.search(range_pattern, text_clean)
+    # 1. Regex tìm khoảng lương: e.g. "15 - 20 triệu", "1000 - 2000 usd", "12.5tr - 15tr"
+    range_pattern = r'(\d+(?:\.\d+)?)\s*(triệu|tr|usd|\$|vnđ|vnd|k)?\s*(?:-|–|—|đến|to|~)\s*(\d+(?:\.\d+)?)\s*(triệu|tr|usd|\$|vnđ|vnd|k)?'
+    match = re.search(range_pattern, t)
     if match:
         try:
             val1 = float(match.group(1))
-            val2 = float(match.group(2))
-            unit = match.group(3)
+            val2 = float(match.group(3))
+            
+            unit1 = match.group(2)
+            unit2 = match.group(4)
+            unit = unit2 or unit1
             
             if not unit:
-                if any(w in text_clean for w in ["triệu", "tr"]): unit = "triệu"
-                elif any(w in text_clean for w in ["usd", "$"]): unit = "usd"
-                elif "k" in text_clean: unit = "k"
+                if any(w in t for w in ["triệu", "tr"]): unit = "triệu"
+                elif any(w in t for w in ["usd", "$"]): unit = "usd"
+                elif "k" in t: unit = "k"
                 else:
                     if val2 <= 100: unit = "triệu"
                     elif val2 <= 5000: unit = "usd"
@@ -347,25 +354,16 @@ def parse_salary_from_text(text):
         except:
             pass
 
-    # 2. Regex tìm lương đơn (từ/lên đến/...)
-    single_pattern = r'(?:từ|lên đến|đến|tới|dưới|trên|up to|upto|khoảng)\s*(\d+)\s*(triệu|tr|usd|\$|vnđ|vnd|k)?'
-    match = re.search(single_pattern, text_clean)
+    # 2. Regex tìm lương đơn (từ/lên đến/...) hoặc có đơn vị rõ ràng
+    single_pattern = r'(?:từ|lên đến|đến|tới|dưới|trên|up to|upto|khoảng)?\s*(\d+(?:\.\d+)?)\s*(triệu|tr|usd|\$|vnđ|vnd|k)'
+    match = re.search(single_pattern, t)
     if match:
         try:
             val = float(match.group(1))
             unit = match.group(2)
             
-            if not unit:
-                if any(w in text_clean for w in ["triệu", "tr"]): unit = "triệu"
-                elif any(w in text_clean for w in ["usd", "$"]): unit = "usd"
-                elif "k" in text_clean: unit = "k"
-                else:
-                    if val <= 100: unit = "triệu"
-                    elif val <= 5000: unit = "usd"
-                    else: unit = "vnd"
-            
             min_v, max_v, curr = scale_salary(val, None, unit)
-            if any(w in text_clean for w in ["lên đến", "upto", "đến", "tới", "dưới"]):
+            if any(w in t for w in ["lên đến", "upto", "đến", "tới", "dưới"]):
                 return None, min_v, curr
             else:
                 return min_v, None, curr
@@ -374,7 +372,7 @@ def parse_salary_from_text(text):
             
     # 3. Tìm số thuần tuý nếu có dạng lương VND đầy đủ (e.g. 15000000)
     raw_pattern = r'(\d{7,10})'
-    match = re.search(raw_pattern, text_clean)
+    match = re.search(raw_pattern, t)
     if match:
         try:
             val = float(match.group(1))
@@ -412,25 +410,19 @@ def normalize_salary(raw_val, title="", desc=""):
     if max_s is not None:
         max_vnd = max_s * USD_RATE if curr == "USD" else max_s
         
+    # Áp dụng bộ lọc loại bỏ outlier (nếu lương quá cao, ví dụ > 300 triệu VND)
+    MAX_SALARY_THRESHOLD = 300000000
+    if (min_vnd is not None and min_vnd > MAX_SALARY_THRESHOLD) or (max_vnd is not None and max_vnd > MAX_SALARY_THRESHOLD):
+        min_vnd = None
+        max_vnd = None
+        
     display_str = "Thỏa thuận"
-    if min_s is not None and max_s is not None:
-        if curr == "USD":
-            display_str = f"{int(min_s):,} - {int(max_s):,} USD"
-        else:
-            display_str = f"{min_s/1000000:g} - {max_s/1000000:g} Triệu VND"
-    elif min_s is not None:
-        if curr == "USD":
-            display_str = f"Từ {int(min_s):,} USD"
-        else:
-            display_str = f"Từ {min_s/1000000:g} Triệu VND"
-    elif max_s is not None:
-        if curr == "USD":
-            display_str = f"Lên đến {int(max_s):,} USD"
-        else:
-            display_str = f"Lên đến {max_s/1000000:g} Triệu VND"
-    else:
-        if raw_clean and raw_clean != "N/A":
-            display_str = raw_clean
+    if min_vnd is not None and max_vnd is not None:
+        display_str = f"{min_vnd:,.0f} - {max_vnd:,.0f}".replace(",", ".")
+    elif min_vnd is not None:
+        display_str = f"Từ {min_vnd:,.0f}".replace(",", ".")
+    elif max_vnd is not None:
+        display_str = f"Lên đến {max_vnd:,.0f}".replace(",", ".")
             
     return (
         int(min_vnd) if min_vnd is not None else "",
@@ -441,32 +433,71 @@ def normalize_salary(raw_val, title="", desc=""):
 def parse_experience_from_text(text):
     if not text:
         return None, None
-    text_lower = text.lower()
     
-    if any(w in text_lower for w in ["không yêu cầu", "không cần", "chưa có kinh nghiệm", "no experience", "fresh", "mới tốt nghiệp", "tts", "intern"]):
+    # 1. Chuyển về chữ thường và loại bỏ khoảng trắng đầu cuối
+    t = text.lower().strip()
+    # 2. Xóa các dấu phân cách hàng nghìn (nếu có) và chuẩn hóa thập phân
+    t = re.sub(r'[\.,](?=\d{3}(?!\d))', '', t)
+    t = t.replace(",", ".")
+    
+    no_exp_keywords = [
+        "không yêu cầu", "không cần", "chưa có kinh nghiệm", "chưa có k/nghiệm",
+        "no experience", "fresh", "mới tốt nghiệp", "tts", "intern", 
+        "thực tập sinh", "không yêu cầu kinh nghiệm", "no experience required"
+    ]
+    if any(w in t for w in no_exp_keywords):
         return 0, 0
         
-    # Khoảng kinh nghiệm
-    range_pattern = r'(\d+)\s*(?:-|đến|to|~)\s*(\d+)\s*(?:năm|years?|y)'
-    match = re.search(range_pattern, text_lower)
+    # Khoảng kinh nghiệm (ví dụ: "12 - 24 tháng", "1 - 2 năm", "12 tháng - 2 năm")
+    range_pattern = r'(\d+(?:\.\d+)?)\s*(năm|years?|y|tháng|months?|m)?\s*(?:-|đến|to|~)\s*(\d+(?:\.\d+)?)\s*(năm|years?|y|tháng|months?|m)'
+    match = re.search(range_pattern, t)
     if match:
         try:
-            return int(match.group(1)), int(match.group(2))
+            val1 = float(match.group(1))
+            unit1 = match.group(2)
+            val2 = float(match.group(3))
+            unit2 = match.group(4)
+            
+            if not unit1:
+                unit1 = unit2
+                
+            if unit1 in ["tháng", "months", "m"]:
+                min_exp = val1 / 12.0
+            else:
+                min_exp = val1
+                
+            if unit2 in ["tháng", "months", "m"]:
+                max_exp = val2 / 12.0
+            else:
+                max_exp = val2
+                
+            min_exp = int(min_exp) if min_exp.is_integer() else round(min_exp, 1)
+            max_exp = int(max_exp) if max_exp.is_integer() else round(max_exp, 1)
+            return min_exp, max_exp
         except:
             pass
             
-    # Kinh nghiệm đơn
-    single_pattern = r'(?:từ|trên|tối thiểu|ít nhất|có|dưới|khoảng|yêu cầu)?\s*(\d+)\s*(?:\+)?\s*(?:năm|years?|y)'
-    match = re.search(single_pattern, text_lower)
+    # Kinh nghiệm đơn lẻ (ví dụ: "từ 1 năm", "2 năm+", "18 tháng")
+    single_pattern = r'(?:từ|trên|tối thiểu|ít nhất|có|dưới|khoảng|yêu cầu)?\s*(\d+(?:\.\d+)?)\s*(?:\+)?\s*(năm|years?|y|tháng|months?|m)'
+    match = re.search(single_pattern, t)
     if match:
         try:
-            val = int(match.group(1))
-            if "dưới" in text_lower:
-                return 0, val
-            elif any(w in text_lower for w in ["trên", "tối thiểu", "ít nhất", "+"]):
-                return val, None
+            val = float(match.group(1))
+            unit = match.group(2)
+            
+            if unit in ["tháng", "months", "m"]:
+                exp_val = val / 12.0
             else:
-                return val, val
+                exp_val = val
+                
+            exp_val = int(exp_val) if exp_val.is_integer() else round(exp_val, 1)
+            
+            if "dưới" in t:
+                return 0, exp_val
+            elif any(w in t for w in ["từ", "trên", "tối thiểu", "ít nhất", "+"]):
+                return exp_val, None
+            else:
+                return exp_val, exp_val
         except:
             pass
             
@@ -494,6 +525,8 @@ def normalize_experience(raw_val, title="", desc=""):
     if min_e is not None and max_e is not None:
         if min_e == 0 and max_e == 0:
             display_str = "Không yêu cầu"
+        elif min_e == 0:
+            display_str = f"Dưới {max_e} năm"
         elif min_e == max_e:
             display_str = f"{min_e} năm"
         else:
@@ -758,8 +791,33 @@ def extract_job_details(platform_name, soup, url):
             elif isinstance(org, str):
                 result["company"] = org
 
-        result["date_posted"] = json_data.get('datePosted') or result["date_posted"]
-        
+        # Date Posted
+        date_posted = json_data.get('datePosted')
+        if date_posted:
+            result["date_posted"] = date_posted.split('T')[0]
+            
+        # Expiry Date (validThrough)
+        valid_through = json_data.get('validThrough')
+        if valid_through:
+            result["expiry_date"] = valid_through.split('T')[0]
+
+        # Location from JSON-LD jobLocation
+        job_loc = json_data.get('jobLocation')
+        if job_loc:
+            loc_list = job_loc if isinstance(job_loc, list) else [job_loc]
+            loc_names = []
+            for item in loc_list:
+                if isinstance(item, dict):
+                    addr = item.get('address')
+                    if isinstance(addr, dict):
+                        loc_str = addr.get('addressRegion') or addr.get('addressLocality') or addr.get('streetAddress')
+                        if loc_str:
+                            loc_names.append(loc_str)
+                    elif isinstance(addr, str):
+                        loc_names.append(addr)
+            if loc_names:
+                result["location"] = ", ".join(loc_names)
+
         # Salary từ JSON-LD
         sal_data = json_data.get('baseSalary')
         if sal_data:
@@ -768,8 +826,25 @@ def extract_job_details(platform_name, soup, url):
                 if isinstance(sal, dict):
                     v_min = sal.get('minValue') or sal.get('value')
                     v_max = sal.get('maxValue')
-                    if v_min and v_max: result["salary"] = f"{v_min} - {v_max}"
-                    elif v_min: result["salary"] = str(v_min)
+                    if v_min is not None and v_max is not None:
+                        try:
+                            v_min_f = float(v_min)
+                            v_max_f = float(v_max)
+                            if v_min_f >= 1000000 and v_max_f >= 1000000:
+                                result["salary"] = f"{v_min_f/1000000:g} - {v_max_f/1000000:g} triệu"
+                            else:
+                                result["salary"] = f"{v_min} - {v_max}"
+                        except:
+                            result["salary"] = f"{v_min} - {v_max}"
+                    elif v_min is not None:
+                        try:
+                            v_min_f = float(v_min)
+                            if v_min_f >= 1000000:
+                                result["salary"] = f"Từ {v_min_f/1000000:g} triệu"
+                            else:
+                                result["salary"] = str(v_min)
+                        except:
+                            result["salary"] = str(v_min)
                 elif sal:
                     result["salary"] = str(sal)
             elif isinstance(sal_data, str):
@@ -778,14 +853,28 @@ def extract_job_details(platform_name, soup, url):
         # Experience từ JSON-LD
         exp_req = json_data.get('experienceRequirements')
         if exp_req:
-            if isinstance(exp_req, dict): result["experience"] = exp_req.get('monthsOfExperience') or str(exp_req)
-            else: result["experience"] = str(exp_req)
+            if isinstance(exp_req, dict):
+                months = exp_req.get('monthsOfExperience')
+                if months:
+                    try:
+                        months = int(months)
+                        if months % 12 == 0:
+                            result["experience"] = f"{months // 12} năm"
+                        else:
+                            result["experience"] = f"{months / 12:g} năm"
+                    except:
+                        result["experience"] = str(months)
+                else:
+                    result["experience"] = str(exp_req)
+            else:
+                result["experience"] = str(exp_req)
 
         desc_html = json_data.get('description', '')
         if desc_html:
             result["description"] = clean_description(BeautifulSoup(desc_html, 'html.parser').get_text(separator='\n'))
         
-        if result["title"] != "N/A": return result
+        if result["title"] != "N/A": 
+            return result
 
     # Ưu tiên 3: Fallback selectors (CSS)
     if platform_name == "ITViec":
